@@ -13,7 +13,7 @@ class ConversionTest extends TestCase
     /** @var \Spatie\MediaLibrary\Conversion\Conversion */
     protected $conversion;
 
-    public function setUp()
+    public function setUp(): void
     {
         parent::setUp();
 
@@ -106,6 +106,16 @@ class ConversionTest extends TestCase
         $this->conversion->removeManipulation('format');
 
         $this->assertNull($this->conversion->getManipulations()->getManipulationArgument('format'));
+    }
+
+    /** @test */
+    public function it_can_remove_all_previously_set_manipulations()
+    {
+        $this->assertFalse($this->conversion->getManipulations()->isEmpty());
+
+        $this->conversion->withoutManipulations();
+
+        $this->assertTrue($this->conversion->getManipulations()->isEmpty());
     }
 
     /** @test */
