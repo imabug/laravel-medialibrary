@@ -2,38 +2,41 @@
 
 namespace Spatie\MediaLibrary\Tests;
 
-use File;
-use Carbon\Carbon;
+use CreateMediaTable;
+use CreateTemporaryUploadsTable;
 use Dotenv\Dotenv;
-use Illuminate\Support\Facades\Artisan;
+use File;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Schema\Blueprint;
 use Orchestra\Testbench\TestCase as Orchestra;
-use Illuminate\Database\Eloquent\Relations\Relation;
-use Spatie\MediaLibrary\Tests\Support\TestModels\TestModel;
-use Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithMorphMap;
-use Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithConversion;
-use Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithResponsiveImages;
-use Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithoutMediaConversions;
+use Spatie\MediaLibrary\MediaLibraryServiceProvider;
+use Spatie\MediaLibrary\Support\MediaLibraryPro;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModel;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModelWithConversion;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModelWithConversionQueued;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModelWithConversionsOnOtherDisk;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModelWithMorphMap;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModelWithoutMediaConversions;
+use Spatie\MediaLibrary\Tests\TestSupport\TestModels\TestModelWithResponsiveImages;
+use ZipArchive;
 
 abstract class TestCase extends Orchestra
 {
-    /** @var \Spatie\MediaLibrary\Tests\Support\TestModels\TestModel */
-    protected $testModel;
+    protected TestModel $testModel;
 
-    /** @var \Spatie\MediaLibrary\Tests\Support\TestModels\TestModel */
-    protected $testUnsavedModel;
+    protected TestModel $testUnsavedModel;
 
-    /** @var \Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithConversion */
-    protected $testModelWithConversion;
+    protected TestModelWithConversion $testModelWithConversion;
 
-    /** @var \Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithoutMediaConversions */
-    protected $testModelWithoutMediaConversions;
+    protected TestModelWithoutMediaConversions $testModelWithoutMediaConversions;
 
-    /** @var \Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithMorphMap */
-    protected $testModelWithMorphMap;
+    protected TestModelWithConversionQueued $testModelWithConversionQueued;
 
-    /** @var \Spatie\MediaLibrary\Tests\Support\TestModels\TestModelWithResponsiveImages */
-    protected $testModelWithResponsiveImages;
+    protected TestModelWithMorphMap $testModelWithMorphMap;
+
+    protected TestModelWithResponsiveImages $testModelWithResponsiveImages;
+
+    protected TestModelWithConversionsOnOtherDisk $testModelWithConversionsOnOtherDisk;
 
     public function setUp(): void
     {
@@ -46,11 +49,13 @@ abstract class TestCase extends Orchestra
         $this->setUpTempTestFiles();
 
         $this->testModel = TestModel::first();
-        $this->testUnsavedModel = new TestModel;
+        $this->testUnsavedModel = new TestModel();
         $this->testModelWithConversion = TestModelWithConversion::first();
+        $this->testModelWithConversionQueued = TestModelWithConversionQueued::first();
         $this->testModelWithoutMediaConversions = TestModelWithoutMediaConversions::first();
         $this->testModelWithMorphMap = TestModelWithMorphMap::first();
         $this->testModelWithResponsiveImages = TestModelWithResponsiveImages::first();
+        $this->testModelWithConversionsOnOtherDisk = TestModelWithConversionsOnOtherDisk::first();
     }
 
     protected function loadEnvironmentVariables()
@@ -59,9 +64,9 @@ abstract class TestCase extends Orchestra
             return;
         }
 
-        $dotenv = new Dotenv(__DIR__.'/..');
+        $dotEnv = Dotenv::createImmutable(__DIR__.'/..');
 
-        $dotenv->load();
+        $dotEnv->load();
     }
 
     /**
@@ -71,9 +76,11 @@ abstract class TestCase extends Orchestra
      */
     protected function getPackageProviders($app)
     {
-        return [
-            \Spatie\MediaLibrary\MediaLibraryServiceProvider::class,
+        $serviceProviders = [
+            MedialibraryServiceProvider::class,
         ];
+
+        return $serviceProviders;
     }
 
     /**
@@ -83,33 +90,33 @@ abstract class TestCase extends Orchestra
     {
         $this->initializeDirectory($this->getTempDirectory());
 
-        $app['config']->set('database.default', 'sqlite');
-        $app['config']->set('database.connections.sqlite', [
+        config()->set('database.default', 'sqlite');
+        config()->set('database.connections.sqlite', [
             'driver' => 'sqlite',
             'database' => ':memory:',
             'prefix' => '',
         ]);
 
-        $app['config']->set('filesystems.disks.public', [
+        config()->set('filesystems.disks.public', [
             'driver' => 'local',
             'root' => $this->getMediaDirectory(),
+            'url' => '/media',
         ]);
 
-        $app['config']->set('filesystems.disks.secondMediaDisk', [
+        config()->set('filesystems.disks.secondMediaDisk', [
             'driver' => 'local',
             'root' => $this->getTempDirectory('media2'),
+            'url' => '/media2',
         ]);
 
-        $app->bind('path.public', function () {
-            return $this->getTempDirectory();
-        });
+        $app->bind('path.public', fn () => $this->getTempDirectory());
 
-        $app['config']->set('app.key', '6rE9Nz59bGRbeMATftriyQjrpF7DcOQm');
+        config()->set('app.key', '6rE9Nz59bGRbeMATftriyQjrpF7DcOQm');
 
         $this->setupS3($app);
         $this->setUpMorphMap();
 
-        $app['config']->set('view.paths', [__DIR__.'/Support/resources/views']);
+        config()->set('view.paths', [__DIR__.'/TestSupport/resources/views']);
     }
 
     /**
@@ -126,14 +133,21 @@ abstract class TestCase extends Orchestra
 
         TestModel::create(['name' => 'test']);
 
-        include_once __DIR__.'/../database/migrations/create_media_table.php.stub';
-        (new \CreateMediaTable())->up();
+
+        if (MediaLibraryPro::isInstalled()) {
+            include_once __DIR__ . '/../vendor/spatie/laravel-medialibrary-pro/database/migrations/create_temporary_uploads_table.stub';
+            (new CreateTemporaryUploadsTable())->up();
+        }
+
+        include_once(__DIR__  . '/../database/migrations/create_media_table.php.stub');
+
+        (new CreateMediaTable())->up();
     }
 
     protected function setUpTempTestFiles()
     {
         $this->initializeDirectory($this->getTestFilesDirectory());
-        File::copyDirectory(__DIR__.'/Support/testfiles', $this->getTestFilesDirectory());
+        File::copyDirectory(__DIR__.'/TestSupport/testfiles', $this->getTestFilesDirectory());
     }
 
     protected function initializeDirectory($directory)
@@ -144,95 +158,106 @@ abstract class TestCase extends Orchestra
         File::makeDirectory($directory);
     }
 
-    public function getTempDirectory($suffix = '')
+    public function getTestsPath($suffix = ''): string
     {
-        return __DIR__.'/Support/temp'.($suffix == '' ? '' : '/'.$suffix);
+        if ($suffix !== '') {
+            $suffix = "/{$suffix}";
+        }
+
+        return __DIR__.$suffix;
     }
 
-    public function getMediaDirectory($suffix = '')
+    public function getTempDirectory($suffix = ''): string
+    {
+        return __DIR__.'/TestSupport/temp'.($suffix == '' ? '' : '/'.$suffix);
+    }
+
+    public function getMediaDirectory($suffix = ''): string
     {
         return $this->getTempDirectory().'/media'.($suffix == '' ? '' : '/'.$suffix);
     }
 
-    public function getTestFilesDirectory($suffix = '')
+    public function getTestFilesDirectory($suffix = ''): string
     {
         return $this->getTempDirectory().'/testfiles'.($suffix == '' ? '' : '/'.$suffix);
     }
 
-    public function getTestJpg()
+    public function getTestJpg(): string
     {
         return $this->getTestFilesDirectory('test.jpg');
     }
 
-    public function getSmallTestJpg()
+    public function getSmallTestJpg(): string
     {
         return $this->getTestFilesDirectory('smallTest.jpg');
     }
 
-    public function getTestPng()
+    public function getTestPng(): string
     {
         return $this->getTestFilesDirectory('test.png');
     }
 
-    public function getTestWebm()
+    public function getTestWebm(): string
     {
         return $this->getTestFilesDirectory('test.webm');
     }
 
-    public function getTestPdf()
+    public function getTestPdf(): string
     {
         return $this->getTestFilesDirectory('test.pdf');
     }
 
-    public function getTestSvg()
+    public function getTestSvg(): string
     {
         return $this->getTestFilesDirectory('test.svg');
     }
 
-    public function getTestWebp()
+    public function getTestWebp(): string
     {
         return $this->getTestFilesDirectory('test.webp');
     }
 
-    public function getTestMp4()
+    public function getTestMp4(): string
     {
         return $this->getTestFilesDirectory('test.mp4');
     }
 
-    private function setUpMorphMap()
+    public function getTestImageWithoutExtension(): string
+    {
+        return $this->getTestFilesDirectory('image');
+    }
+
+    public function getTestImageEndingWithUnderscore(): string
+    {
+        return $this->getTestFilesDirectory('test_.jpg');
+    }
+
+    public function getAntaresThumbJpgWithAccent(): string
+    {
+        return $this->getTestFilesDirectory('antarèsthumb.jpg');
+    }
+
+    private function setUpMorphMap(): void
     {
         Relation::morphMap([
             'test-model-with-morph-map' => TestModelWithMorphMap::class,
         ]);
     }
 
-    private function setupS3($app)
+    private function setupS3($app): void
     {
-        $s3Configuration = [
+        config()->set('filesystems.disks.s3_disk', [
             'driver' => 's3',
-            'key' => getenv('AWS_KEY'),
-            'secret' => getenv('AWS_SECRET'),
-            'region' => getenv('AWS_REGION'),
+            'key' => getenv('AWS_ACCESS_KEY_ID'),
+            'secret' => getenv('AWS_SECRET_ACCESS_KEY'),
+            'region' => getenv('AWS_DEFAULT_REGION'),
             'bucket' => getenv('AWS_BUCKET'),
-        ];
-
-        $app['config']->set('filesystems.disks.s3_disk', $s3Configuration);
-        $app['config']->set(
-            'medialibrary.s3.domain',
-            'https://'.$s3Configuration['bucket'].'.s3.amazonaws.com'
-        );
+        ]);
     }
 
-    public function skipOnTravis()
+    public function renderView($view, $parameters): string
     {
-        if (! empty(getenv('TRAVIS_BUILD_ID'))) {
-            $this->markTestSkipped('Skipping because this test does not run properly on Travis');
-        }
-    }
-
-    public function renderView($view, $parameters)
-    {
-        Artisan::call('view:clear');
+        $this->artisan('view:clear');
 
         if (is_string($view)) {
             $view = view($view)->with($parameters);
@@ -241,21 +266,49 @@ abstract class TestCase extends Orchestra
         return trim((string) ($view));
     }
 
-    protected function setNow($year, int $month = 1, int $day = 1)
+    protected function assertFileExistsInZip(string $zipPath, string $filename)
     {
-        $newNow = $year instanceof Carbon
-            ? $year
-            : Carbon::createFromDate($year, $month, $day);
-
-        Carbon::setTestNow($newNow);
+        $this->assertTrue(
+            $this->fileExistsInZip($zipPath, $filename),
+            "Failed to assert that {$zipPath} contains a file name {$filename}"
+        );
     }
 
-    protected function progressTime(int $minutes)
+    protected function assertFileExistsInZipRecognizeFolder(string $zipPath, string $filename)
     {
-        $newNow = now()->copy()->addMinutes($minutes);
+        $this->assertTrue(
+            $this->fileExistsInZipRecognizeFolder($zipPath, $filename),
+            "Failed to assert that {$zipPath} contains a file name {$filename} by recognizing folders"
+        );
+    }
 
-        Carbon::setTestNow($newNow);
+    protected function assertFileDoesntExistsInZip(string $zipPath, string $filename)
+    {
+        $this->assertFalse(
+            $this->fileExistsInZip($zipPath, $filename),
+            "Failed to assert that {$zipPath} doesn't contain a file name {$filename}"
+        );
+    }
 
-        return $this;
+    protected function fileExistsInZip($zipPath, $filename): bool
+    {
+        $zip = new ZipArchive();
+
+        if ($zip->open($zipPath) === true) {
+            return $zip->locateName($filename, ZipArchive::FL_NODIR) !== false;
+        }
+
+        return false;
+    }
+
+    protected function fileExistsInZipRecognizeFolder($zipPath, $filename): bool
+    {
+        $zip = new ZipArchive();
+
+        if ($zip->open($zipPath) === true) {
+            return $zip->locateName($filename) !== false;
+        }
+
+        return false;
     }
 }
